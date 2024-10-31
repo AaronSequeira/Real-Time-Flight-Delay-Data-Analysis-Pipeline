@@ -1,0 +1,2 @@
+spark_processing/checkpoints/
+spark_processing/processed_flight_data.csv/
