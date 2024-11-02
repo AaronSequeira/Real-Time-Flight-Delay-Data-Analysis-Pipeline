@@ -2,10 +2,13 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col, when, concat_ws
 from pyspark.sql.types import StructType, StringType, IntegerType, FloatType
 import os
-# import boto3  # Uncomment if you plan to use boto3 later
+import boto3  # Uncomment if you plan to use boto3 later
 
 # Initialize Spark session
-spark = SparkSession.builder.appName("FlightDataProcessing").getOrCreate()
+spark = SparkSession.builder \
+    .appName("FlightDataProcessing") \
+    .getOrCreate()
+    # .config("spark.sql.shuffle.partitions", "15") \
 
 # Set log level to WARN to reduce verbosity
 spark.sparkContext.setLogLevel("WARN")
@@ -35,29 +38,42 @@ schema = StructType() \
     .add("late_aircraft_delay", FloatType())
 
 # Define file path for local CSV output
-output_file = "/app/processed_flight_data.csv"
+output_file = "/app/processed_flight_data"
 
-# Function to write each batch to a CSV file
+# # S3 bucket and file path
+bucket_name = "flight-delay-data"  # Replace with your actual S3 bucket name
+s3_file_path = "processed_flight_data"  # Define the path within the S3 bucket
+
+# Initialize the S3 client
+s3_client = boto3.client('s3')
+
+# Define output path for local CSV storage
+output_dir = "/app/processed_flight_data"
+
 def write_to_csv(df, epoch_id):
-    if not os.path.isfile(output_file):
-        # Write headers if the file does not exist
-        df.write.mode("overwrite").csv(output_file, header=True)
-    else:
-        # Append data if the file already exists
-        df.write.mode("append").csv(output_file, header=False)
-    pass  # Replace pass with S3 upload code when ready
-
-    # Uncomment and modify the code below when ready to write to S3 using boto3
-    """
-    # Convert DataFrame to Pandas for boto3 upload
-    pandas_df = df.toPandas()
-    csv_buffer = StringIO()
-    pandas_df.to_csv(csv_buffer, index=False)
+    # Write each partition to a separate file in the specified output directory
+    df.coalesce(5).write.mode("overwrite").csv(output_file, header=True)
+    print(f"Batch {epoch_id} completed.")
+    # S3 upload code is commented out to focus on local storage only
     
-    # Upload to S3 using boto3
-    s3 = boto3.client('s3')
-    s3.put_object(Bucket='your-bucket-name', Key='processed_flight_data.csv', Body=csv_buffer.getvalue())
-    """
+    # Uncomment this section when ready to upload files to S3
+    for file_name in os.listdir(output_dir):
+        if file_name.endswith(".csv"):
+            local_file_path = os.path.join(output_dir, file_name)
+            
+            # Generate a unique S3 path for each file if needed
+            unique_s3_file_path = f"{epoch_id}_{file_name}"
+            
+            try:
+                s3_client.upload_file(local_file_path, bucket_name, unique_s3_file_path)
+                print(f"Uploaded {local_file_path} to s3://{bucket_name}/{unique_s3_file_path}")
+            except Exception as e:
+                print(f"Failed to upload to S3: {e}")
+            
+            # Optional: Delete each local file after upload
+            os.remove(local_file_path)
+
+
 
 # Read data stream from Kafka
 flight_data_stream = spark.readStream \
@@ -84,8 +100,6 @@ flight_data = flight_data.fillna(fill_values)
 flight_data = flight_data \
     .withColumn("date", concat_ws("-", col("year"), col("month"))) \
     .withColumn("delay_percentage", when(col("arr_flights") > 0, (col("arr_del15") / col("arr_flights")) * 100).otherwise(0)) \
-    .withColumn("total_delay_by_cause", 
-                col("carrier_delay") + col("weather_delay") + col("nas_delay") + col("security_delay") + col("late_aircraft_delay")) \
     .withColumnRenamed("arr_flights", "total_arrivals") \
     .withColumnRenamed("arr_del15", "arrivals_delayed_15_min") \
     .withColumnRenamed("carrier_ct", "carrier_delay_count") \
